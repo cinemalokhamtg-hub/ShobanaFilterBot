@@ -14,6 +14,22 @@ _LIBSQL_LOCK = asyncio.Lock()
 _FALLBACK_SQLITE = "data/turso_fallback.db"
 _LAST_LIBSQL_WARNING = {"query": 0.0, "fetch": 0.0}
 _WARNING_INTERVAL = 60.0
+_LIBSQL_DISABLED_UNTIL = 0.0
+_LIBSQL_COOLDOWN_SECONDS = 300.0
+
+
+def _libsql_temporarily_disabled() -> bool:
+    return time.monotonic() < _LIBSQL_DISABLED_UNTIL
+
+
+def _disable_libsql_temporarily(error: Exception) -> None:
+    global _LIBSQL_DISABLED_UNTIL
+    _LIBSQL_DISABLED_UNTIL = time.monotonic() + _LIBSQL_COOLDOWN_SECONDS
+    logger.warning(
+        "libsql temporarily disabled for %.0fs after connection/query failure; using local fallback sqlite. error=%s",
+        _LIBSQL_COOLDOWN_SECONDS,
+        error,
+    )
 
 
 def _log_libsql_fallback(kind: str, error: Exception) -> None:
@@ -92,10 +108,18 @@ async def _libsql_execute(query: str, params=()):
 
 async def db_execute(query: str, params=()):
     if libsql_mode():
+        if _libsql_temporarily_disabled():
+            with _fallback_conn() as conn:
+                cur = conn.execute(query, tuple(params or ()))
+                conn.commit()
+                return cur
         try:
             return await _libsql_execute(query, params)
         except Exception as e:
-            _log_libsql_fallback("query", e)
+            if "Cannot connect to host" in str(e) or "Name or service not known" in str(e):
+                _disable_libsql_temporarily(e)
+            else:
+                _log_libsql_fallback("query", e)
             with _fallback_conn() as conn:
                 cur = conn.execute(query, tuple(params or ()))
                 conn.commit()
@@ -109,6 +133,15 @@ async def db_execute(query: str, params=()):
 
 async def db_fetchall(query: str, params=()):
     if libsql_mode():
+        if _libsql_temporarily_disabled():
+            with _fallback_conn() as conn:
+                try:
+                    cur = conn.execute(query, tuple(params or ()))
+                    return [dict(r) for r in cur.fetchall()]
+                except sqlite3.OperationalError as oe:
+                    if "no such table" in str(oe).lower() and query.strip().lower().startswith("select"):
+                        return []
+                    raise
         try:
             result = await _libsql_execute(query, params)
             rows = getattr(result, "rows", []) or []
@@ -120,7 +153,10 @@ async def db_fetchall(query: str, params=()):
                     normalized.append(dict(row)) if hasattr(row, "keys") else normalized.append({str(i): v for i, v in enumerate(row)})
             return normalized
         except Exception as e:
-            _log_libsql_fallback("fetch", e)
+            if "Cannot connect to host" in str(e) or "Name or service not known" in str(e):
+                _disable_libsql_temporarily(e)
+            else:
+                _log_libsql_fallback("fetch", e)
             with _fallback_conn() as conn:
                 try:
                     cur = conn.execute(query, tuple(params or ()))
