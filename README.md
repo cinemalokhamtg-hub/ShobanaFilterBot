@@ -105,8 +105,8 @@
 
 > **Important note**  
 > Current SQL backend in this repository runs on SQLite engine (`sqlite:///...`).  
-> If you set a direct Turso `libsql://` URL, startup now fails early with a clear error message instead of crashing later.  
-> For stable deployment, use `SQLDB=sqlite:///data/bot.db` on Koyeb.
+> If you set a direct Turso `libsql://` URL, this build falls back to local sqlite runtime file (`data/turso_fallback.db`) to prevent startup crashes.  
+> For predictable behavior, you can set `SQLDB=sqlite:///data/bot.db` on Koyeb.
 
 1. **Create Turso database**
    - Install and login to Turso CLI.
